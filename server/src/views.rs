@@ -1,10 +1,4 @@
-use crate::{
-    models::{self, message},
-    utils, AppState, SESSION_DURATION, SESSION_KEY,
-};
-
-use message::ToInPollOp;
-use models::PollOpSender;
+use crate::{models, utils, AppState, SESSION_DURATION, SESSION_KEY};
 
 use axum::{
     body,
@@ -19,7 +13,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -90,7 +87,12 @@ pub async fn create_poll(
     if msg.title.is_empty() {
         StatusCode::BAD_REQUEST.into_response()
     } else {
-        let poll_id = state.polls.create_poll(user.id, msg.title.clone()).await;
+        let (poll_id, _) = state
+            .polls
+            .lock()
+            .unwrap()
+            .add_poll(user.id, msg.title.clone());
+
         Json(anket_shared::CreatePollResp {
             id: poll_id,
             title: msg.title.clone(),
@@ -106,10 +108,12 @@ pub async fn poll_events(
     ws: ws::WebSocketUpgrade,
 ) -> Response {
     let (user_sender, user_receiver) = mpsc::unbounded_channel();
-    let poll_sender = state.polls.join_poll(user.id, poll_id, user_sender).await;
-    match poll_sender {
-        Some(poll_sender) => {
-            ws.on_upgrade(move |socket| events_handler(socket, user.id, poll_sender, user_receiver))
+
+    let poll = state.polls.lock().unwrap().get_poll(&poll_id);
+    match poll {
+        Some(poll) => {
+            poll.lock().unwrap().add_viewer(user.id, user_sender);
+            ws.on_upgrade(move |socket| events_handler(socket, user.id, poll, user_receiver))
         }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -121,7 +125,7 @@ pub async fn poll_events(
 async fn events_handler(
     socket: ws::WebSocket,
     user_id: Uuid,
-    poll_sender: mpsc::Sender<message::InPollOp>,
+    poll: Arc<Mutex<crate::models::Poll>>,
     mut user_receiver: mpsc::UnboundedReceiver<anket_shared::PollState>,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -139,10 +143,16 @@ async fn events_handler(
         while let Some(wsmsg) = ws_receiver.next().await {
             if let Ok(ws::Message::Text(text)) = wsmsg {
                 if let Ok(msg) = serde_json::from_str::<anket_shared::Message>(&text) {
-                    if poll_sender.send(msg.to_poll(user_id)).await.is_err() {
-                        // poll ended
-                        break;
+                    match msg {
+                        anket_shared::Message::AddItem { text } => {
+                            poll.lock().unwrap().add_item(user_id, text);
+                        }
+                        anket_shared::Message::VoteItem { item_id, vote } => {
+                            poll.lock().unwrap().vote_item(user_id, item_id, vote);
+                        }
                     }
+                } else {
+                    // TODO we need to inform user
                 }
             } else if let Ok(ws::Message::Close(_)) = wsmsg {
                 // client disconnected

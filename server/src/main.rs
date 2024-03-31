@@ -2,8 +2,6 @@ mod models;
 mod utils;
 mod views;
 
-use crate::models::message;
-
 use axum::response::IntoResponse;
 use axum::{http, middleware, response, routing};
 use rust_embed::RustEmbed;
@@ -58,18 +56,19 @@ var ANKET_SECURE = {};
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<AppConfig>,
+    // TODO use std mutex here too
     users: Arc<Mutex<models::Users>>,
-    polls: mpsc::Sender<message::PollOp>,
+    polls: Arc<std::sync::Mutex<models::Polls>>,
 }
 
 impl AppState {
     fn init(config: AppConfig) -> AppState {
         let users = models::Users::init();
-        let (polls_sender, _) = models::Polls::init();
+        let polls = models::Polls::new();
         AppState {
             config: Arc::new(config),
             users: Arc::new(Mutex::new(users)),
-            polls: polls_sender,
+            polls: Arc::new(std::sync::Mutex::new(polls)),
         }
     }
 }

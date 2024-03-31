@@ -102,6 +102,7 @@ impl<T> TouchTimed<T> {
     pub fn value(&self) -> &T {
         &self.value
     }
+    // TODO these should be done with assignment traits, not by methods
     pub fn update(&mut self, value: T) {
         self.value = value;
         self.last_update = Instant::now();

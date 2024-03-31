@@ -1,196 +1,41 @@
-use crate::models::message::*;
 use crate::utils::{HashMapVecInsert, RingBuffer, StringKeyGenerate, TouchTimed};
 
 use anket_shared::{ItemState, PollState};
 
+// TODO remove async_trait dep
 use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::RangeInclusive;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::debug;
 use uuid::Uuid;
 
-#[async_trait]
-pub trait PollOpSender {
-    async fn create_poll(&self, user_id: Uuid, title: String) -> String;
-    async fn join_poll(
-        &self,
-        user_id: Uuid,
-        poll_id: String,
-        user_sender: mpsc::UnboundedSender<PollState>,
-    ) -> Option<mpsc::Sender<InPollOp>>;
-}
-
-#[async_trait]
-impl PollOpSender for mpsc::Sender<PollOp> {
-    async fn create_poll(&self, user_id: Uuid, title: String) -> String {
-        let (tx, rx) = oneshot::channel();
-        self.send(PollOp::CreatePoll {
-            user_id,
-            title,
-            response: tx,
-        })
-        .await
-        .expect("main polls channel should be alive");
-        rx.await.expect("oneshot response channel should be alive")
-    }
-    async fn join_poll(
-        &self,
-        user_id: Uuid,
-        poll_id: String,
-        user_sender: mpsc::UnboundedSender<PollState>,
-    ) -> Option<mpsc::Sender<InPollOp>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(PollOp::JoinPoll {
-            user_id,
-            poll_id,
-            user_sender,
-            response: tx,
-        })
-        .await
-        .expect("main polls channel should be alive");
-        rx.await.expect("oneshot response channel should be alive")
-    }
-}
-
 pub struct Polls {
-    // HashMap<poll id, (sender to communicate with poll worker, poll worker join handle to abort task)>
-    polls: HashMap<String, (mpsc::Sender<InPollOp>, JoinHandle<()>)>,
-    ops: mpsc::Sender<PollOp>,
+    // HashMap<poll id, poll>
+    polls: HashMap<String, Arc<Mutex<Poll>>>,
 }
 
 impl Polls {
-    pub fn init() -> (mpsc::Sender<PollOp>, JoinHandle<()>) {
-        let (op_sender, mut op_receiver) = mpsc::channel(10_000);
-        let mut polls = Self {
+    pub fn new() -> Self {
+        Self {
             polls: HashMap::new(),
-            ops: op_sender.clone(),
-        };
-        let polls_worker = tokio::spawn(async move {
-            debug!("main polls task started");
-            while let Some(op) = op_receiver.recv().await {
-                polls.process(op).await;
-            }
-            debug!("main polls task finished");
-        });
-        (op_sender, polls_worker)
-    }
-    async fn process(&mut self, op: PollOp) {
-        match op {
-            PollOp::CreatePoll {
-                user_id,
-                title,
-                response,
-            } => {
-                let poll_id = self.new_poll(user_id, title, self.ops.clone());
-                response
-                    .send(poll_id)
-                    .unwrap_or_else(|_| debug!("response could not be sent"));
-            }
-            PollOp::DeletePoll { poll_id, response } => {
-                let op = self.delete_poll(&poll_id);
-                if let Some(response) = response {
-                    response
-                        .send(op)
-                        .unwrap_or_else(|_| debug!("response could not be sent"));
-                }
-            }
-            PollOp::JoinPoll {
-                user_id,
-                poll_id,
-                user_sender,
-                response,
-            } => {
-                let resp_obj = match self.get_poll(&poll_id) {
-                    Some((poll_ops, _)) => {
-                        let poll_sender = poll_ops.clone();
-                        match poll_sender
-                            .send(InPollOp::Join {
-                                user_id,
-                                user_sender,
-                            })
-                            .await
-                        {
-                            Ok(_) => Some(poll_sender),
-                            Err(_) => {
-                                // poll channel is dropped, delete poll from polls HashMap
-                                self.delete_poll(&poll_id);
-                                None
-                            }
-                        }
-                    }
-                    None => None,
-                };
-                response
-                    .send(resp_obj)
-                    .unwrap_or_else(|_| debug!("response could not be sent"));
-            }
         }
     }
-    fn new_poll(
-        &mut self,
-        user_id: Uuid,
-        title: String,
-        polls_ops: mpsc::Sender<PollOp>,
-    ) -> String {
+    pub fn add_poll(&mut self, user_id: Uuid, title: String) -> (String, Arc<Mutex<Poll>>) {
         let id = self.polls.generate_key(8);
-        let (sender, mut receiver) = mpsc::channel(10_000);
-
-        let poll_id = id.clone();
-        let worker_task = tokio::spawn(async move {
-            let mut poll = Poll::new(poll_id.clone(), user_id, title);
-            let mut timer = tokio::time::interval(Duration::from_millis(500));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-            debug!("{} worker started", poll.id);
-            loop {
-                tokio::select! {
-                    _ = timer.tick() => {
-                        if *poll.changed.value() {
-                            debug!("{} poll.changed, broadcasting...", poll.id);
-                            poll.broadcast();
-                        } else if poll.changed.elapsed() > Duration::from_secs(15 * 60) {
-                            debug!("{} is inactive, worker stops", poll.id);
-                            break;
-                        }
-                    }
-                    result = receiver.recv() => {
-                        let op = match result {
-                            Some(op) => op,
-                            None => {
-                                debug!("{} receiver is closed, worker stops", poll.id);
-                                break;
-                            }
-                        };
-                        debug!("{} received {:?}", poll.id, op);
-                        poll.process(op);
-                    }
-                }
-            }
-            debug!("{} worker completed, deleting poll...", poll.id);
-            polls_ops
-                .send(PollOp::DeletePoll {
-                    poll_id,
-                    response: None,
-                })
-                .await
-                .expect("main polls channel should be alive");
-        });
-
-        self.polls.insert(id.clone(), (sender, worker_task));
-        id
+        let poll = Poll::new(id.clone(), user_id, title);
+        self.polls.insert(id.clone(), poll.clone());
+        (id, poll)
     }
-    fn get_poll(&self, poll_id: &String) -> Option<&(mpsc::Sender<InPollOp>, JoinHandle<()>)> {
-        self.polls.get(poll_id)
-    }
-    fn delete_poll(&mut self, poll_id: &String) -> bool {
-        self.polls.remove(poll_id).is_some()
+    pub fn get_poll(&self, poll_id: &str) -> Option<Arc<Mutex<Poll>>> {
+        self.polls.get(poll_id).cloned()
     }
 }
 
-struct Poll {
+pub struct Poll {
     id: String,
     #[allow(dead_code)]
     user_id: Uuid,
@@ -212,11 +57,34 @@ struct Poll {
 
     // connection number, channel sender for send events to user
     audience: HashMap<Uuid, Vec<mpsc::UnboundedSender<PollState>>>,
+    // this is an Option, because task created after this
+    task: Option<JoinHandle<()>>,
+    // TODO bu poll un artik kapanmasi gerektigini, poll HashMap'ine ileten bir channel gerek
+}
+
+async fn poll_worker(poll_mutex: Arc<Mutex<Poll>>) {
+    let mut timer = tokio::time::interval(Duration::from_millis(500));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    debug!("poll worker started");
+    loop {
+        timer.tick().await;
+        let mut poll = poll_mutex.lock().unwrap();
+
+        if *poll.changed.value() {
+            debug!("{} poll.changed, broadcasting...", poll.id);
+            poll.broadcast();
+        } else if poll.changed.elapsed() > Duration::from_secs(15 * 60) {
+            debug!("{} is inactive, worker stops", poll.id);
+            break;
+        }
+    }
+    // TODO bu poll un kapatilmasi gerektigini channel'dan bildir
 }
 
 impl Poll {
-    fn new(id: String, user_id: Uuid, title: String) -> Poll {
-        Poll {
+    fn new(id: String, user_id: Uuid, title: String) -> Arc<Mutex<Self>> {
+        let mut poll_raw = Self {
             id,
             user_id,
             title,
@@ -227,12 +95,26 @@ impl Poll {
             items_by_user: HashMap::new(),
             last_items: RingBuffer::new(10),
             audience: HashMap::new(),
-        }
+            task: None,
+        };
+        let poll = Arc::new(Mutex::new(poll_raw));
+
+        let task = tokio::spawn(poll_worker(poll.clone()));
+        poll.lock().unwrap().task = Some(task);
+
+        poll
     }
-    fn add_viewer(&mut self, user_id: Uuid, user_sender: mpsc::UnboundedSender<PollState>) {
+
+    pub fn add_viewer(&mut self, user_id: Uuid, user_sender: mpsc::UnboundedSender<PollState>) {
+        if !*self.changed.value() {
+            // TODO do better error handling; if we can't send this msg to callsite
+            // then we shouldn't add this user to audience
+            let _ = user_sender.send(self.get_state(&user_id));
+        }
         self.audience.insert_vec(user_id, user_sender);
     }
-    fn add_item(&mut self, user_id: Uuid, item_text: String) -> usize {
+
+    pub fn add_item(&mut self, user_id: Uuid, item_text: String) -> usize {
         let item_id = self.items.len();
         let item = Item {
             id: item_id,
@@ -247,11 +129,15 @@ impl Poll {
         self.items_by_user.insert_vec(user_id, item_id);
         self.last_items.push(item_id);
 
+        // TODO this vote_item call makes some redundant jobs
+        self.vote_item(user_id, item_id, 1);
         self.changed.update(true);
         item_id
     }
-    fn vote_item(&mut self, user_id: Uuid, item_id: usize, value: isize) {
+
+    pub fn vote_item(&mut self, user_id: Uuid, item_id: usize, value: isize) {
         if !self.value_range.contains(&value) {
+            // TODO we can create an error type for this
             return;
         }
         if let Some(item) = self.items.get_mut(&item_id) {
@@ -271,8 +157,11 @@ impl Poll {
 
                 self.changed.update(true);
             }
+        } else {
+            // TODO return error
         }
     }
+
     fn get_state(&self, user_id: &Uuid) -> PollState {
         PollState {
             poll_title: self.title.clone(),
@@ -298,6 +187,7 @@ impl Poll {
                 .collect(),
         }
     }
+
     fn broadcast(&mut self) {
         let all_users: Vec<Uuid> = self.audience.keys().map(|u| *u).collect();
         for user_id in all_users.iter() {
@@ -309,32 +199,6 @@ impl Poll {
             });
         }
         self.changed.update(false);
-    }
-    fn process(&mut self, op: InPollOp) {
-        match op {
-            InPollOp::Join {
-                user_id,
-                user_sender,
-            } => {
-                if !*self.changed.value() {
-                    let _ = user_sender.send(self.get_state(&user_id));
-                }
-                self.add_viewer(user_id, user_sender);
-            }
-            InPollOp::AddItem { user_id, text } => {
-                if !text.is_empty() {
-                    let item_id = self.add_item(user_id, text);
-                    self.vote_item(user_id, item_id, 1);
-                }
-            }
-            InPollOp::VoteItem {
-                user_id,
-                item_id,
-                value,
-            } => {
-                self.vote_item(user_id, item_id, value);
-            }
-        }
     }
 }
 
