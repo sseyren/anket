@@ -3,107 +3,107 @@ use crate::{models, utils, AppState, SESSION_DURATION, SESSION_KEY};
 use axum::{
     body,
     extract::{ws, ConnectInfo, Extension, Path, State},
-    http::{
-        header::{self, HeaderMap},
-        Request, StatusCode,
-    },
+    http::{header::HeaderMap, Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
-    Json,
+    Form,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+// TODO transform this into tower middleware
 pub async fn identify_user<B>(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
     mut request: Request<B>,
     next: middleware::Next<B>,
 ) -> Response {
-    let user_ip = match headers.get("X-Forwarded-For") {
-        Some(header) => match utils::forwarded_header_ip(header) {
-            Some(ip) => ip,
-            None => addr.ip(),
-        },
-        None => addr.ip(),
-    };
-
     let user = {
-        let mut mutmap = state.users.lock().await;
-        let user_by_session = match jar.get(SESSION_KEY) {
-            Some(cookie) => match mutmap.get_user_by_session(cookie.value()) {
-                Some(u) => Some(u.clone()),
-                None => None,
+        // TODO bu header'in baska varyasyonlari da var mi?
+        let ip = match headers.get("X-Forwarded-For") {
+            Some(header) => match utils::forwarded_header_ip(header) {
+                Some(ip) => ip,
+                None => socket_addr.ip(),
             },
+            None => socket_addr.ip(),
+        };
+        let id = match jar.get(SESSION_KEY) {
+            Some(cookie) => Uuid::from_str(cookie.value()).ok(),
             None => None,
         };
-        user_by_session.unwrap_or_else(|| match state.config.user_ip_lookup {
-            true => match mutmap.get_user_by_ip(&user_ip) {
-                Some(u) => u.clone(),
-                None => mutmap.new_user(user_ip).clone(),
-            },
-            false => mutmap.new_user(user_ip).clone(),
-        })
+        models::UserDetails { ip, id }
     };
-    request.extensions_mut().insert(user.clone());
 
-    let mut response = next.run(request).await;
+    request.extensions_mut().insert(user);
+    next.run(request).await
+}
 
-    let req_cookie = jar.get(SESSION_KEY);
-    if req_cookie.is_none() || req_cookie.unwrap().value() != &user.session {
-        let new_cookie = Cookie::build(SESSION_KEY, user.session.clone())
-            .max_age(SESSION_DURATION)
-            .http_only(false)
-            .path(state.config.host.path.clone())
-            .secure(state.config.host.secure)
-            .finish();
+const template_form: &str = r#"
+<form method="POST">
+    <input type="text" name="title" />
+    <select name="user_lookup_method">
+        <option value="SessionBased">Session Based</option>
+        <option value="IPBased">IP Based</option>
+    </select>
 
-        let jar = jar.add(new_cookie);
-        for cookie in jar.iter() {
-            if let Ok(header_value) = cookie.encoded().to_string().parse() {
-                response
-                    .headers_mut()
-                    .append(header::SET_COOKIE, header_value);
-            }
-        }
-    }
+    <input type="submit" value="Create Poll">
+</form>
+"#;
 
-    response
+pub async fn poll_index() -> Response {
+    axum::response::Html(template_form).into_response()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CreatePollReq {
+    #[serde(flatten)]
+    settings: models::PollSettings,
 }
 
 pub async fn create_poll(
     State(state): State<AppState>,
-    Extension(user): Extension<models::User>,
-    Json(msg): Json<anket_shared::CreatePollReq>,
+    Extension(user): Extension<models::UserDetails>,
+    cookie_jar: CookieJar,
+    Form(form): Form<CreatePollReq>,
 ) -> Response {
-    if msg.title.is_empty() {
-        StatusCode::BAD_REQUEST.into_response()
-    } else {
-        let (poll_id, _) = state
-            .polls
-            .lock()
-            .unwrap()
-            .add_poll(user.id, msg.title.clone());
-
-        Json(anket_shared::CreatePollResp {
-            id: poll_id,
-            title: msg.title.clone(),
-        })
-        .into_response()
+    // TODO return an actual response for this
+    if form.settings.title.len() < 2 {
+        return StatusCode::BAD_REQUEST.into_response();
     }
+
+    let (user_id, poll) = state.polls.lock().unwrap().add_poll(form.settings, user);
+    let poll_id = poll.lock().unwrap().get_id().to_owned();
+
+    let cookie_jar = cookie_jar.add(
+        Cookie::build(SESSION_KEY, user_id.to_string())
+            .max_age(SESSION_DURATION)
+            .http_only(false)
+            .path(format!("{}poll/{}", state.config.host.path, poll_id)) // TODO bug when using / as path value // TODO use const vars for path
+            .secure(state.config.host.secure)
+            .finish(),
+    );
+
+    (
+        cookie_jar,
+        axum::response::Html(format!(r#"<h1>Poll created. Poll ID: {}</h1>"#, poll_id)),
+    )
+        .into_response()
 }
 
+// TODO don't forget to return cookie in response
 pub async fn poll_events(
     State(state): State<AppState>,
-    Extension(user): Extension<models::User>,
+    Extension(user): Extension<models::UserDetails>,
     Path(poll_id): Path<String>,
     ws: ws::WebSocketUpgrade,
 ) -> Response {
@@ -112,8 +112,9 @@ pub async fn poll_events(
     let poll = state.polls.lock().unwrap().get_poll(&poll_id);
     match poll {
         Some(poll) => {
-            poll.lock().unwrap().add_viewer(user.id, user_sender);
-            ws.on_upgrade(move |socket| events_handler(socket, user.id, poll, user_receiver))
+            // TODO remove unwrap
+            let user_id = poll.lock().unwrap().join(user, user_sender).unwrap();
+            ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver))
         }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)

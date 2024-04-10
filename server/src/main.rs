@@ -6,11 +6,8 @@ use axum::response::IntoResponse;
 use axum::{http, middleware, response, routing};
 use rust_embed::RustEmbed;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::{
-    self, signal,
-    sync::{mpsc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+use tokio::{self, signal};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -56,19 +53,15 @@ var ANKET_SECURE = {};
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<AppConfig>,
-    // TODO use std mutex here too
-    users: Arc<Mutex<models::Users>>,
-    polls: Arc<std::sync::Mutex<models::Polls>>,
+    polls: Arc<Mutex<models::Polls>>,
 }
 
 impl AppState {
-    fn init(config: AppConfig) -> AppState {
-        let users = models::Users::init();
+    fn init(config: AppConfig) -> Self {
         let polls = models::Polls::new();
-        AppState {
+        Self {
             config: Arc::new(config),
-            users: Arc::new(Mutex::new(users)),
-            polls: Arc::new(std::sync::Mutex::new(polls)),
+            polls: Arc::new(Mutex::new(polls)),
         }
     }
 }
@@ -90,6 +83,7 @@ impl HostDetails {
     }
 }
 
+// TODO burada yer alan bazi seylere artik ihtiyacimiz kalmamis olabilir
 #[derive(Clone, Debug)]
 struct AppConfig {
     host: HostDetails,
@@ -186,19 +180,19 @@ async fn main() {
     let app_config = get_config();
     let app_state = AppState::init(app_config.clone());
 
-    let api_routes = routing::Router::new()
-        .route("/poll", routing::post(views::create_poll))
-        .route("/poll/:id", routing::get(views::poll_events))
+    let routes = routing::Router::new()
+        .route(
+            "/poll",
+            routing::get(views::poll_index).post(views::create_poll),
+        )
+        // .route("/poll/:id", routing::get(views::poll_events))
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
             views::identify_user,
         ))
         .with_state(app_state);
 
-    let routes = routing::Router::new().nest("/api", api_routes).fallback({
-        let app_config = app_config.clone();
-        move |uri| static_handler(uri, app_config)
-    });
+    // TODO add handlers to custom errors like; 404, Failed to deserialize form body
 
     info!("started on {}", &app_config.bind_addr);
     axum::Server::bind(&app_config.bind_addr)

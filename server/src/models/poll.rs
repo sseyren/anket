@@ -1,13 +1,15 @@
-use crate::utils::{HashMapVecInsert, RingBuffer, StringKeyGenerate, TouchTimed};
+use crate::utils::{HashMapVecInsert, RingBuffer, StringKeyGenerate, TouchTimed, UuidKeyGenerate};
 
 use anket_shared::{ItemState, PollState};
 
 // TODO remove async_trait dep
 use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::debug;
@@ -24,22 +26,150 @@ impl Polls {
             polls: HashMap::new(),
         }
     }
-    pub fn add_poll(&mut self, user_id: Uuid, title: String) -> (String, Arc<Mutex<Poll>>) {
+    pub fn add_poll(
+        &mut self,
+        settings: PollSettings,
+        user_details: UserDetails,
+    ) -> (Uuid, Arc<Mutex<Poll>>) {
         let id = self.polls.generate_key(8);
-        let poll = Poll::new(id.clone(), user_id, title);
-        self.polls.insert(id.clone(), poll.clone());
-        (id, poll)
+        let (poll, user_id) = Poll::new(id.clone(), settings, user_details);
+        self.polls.insert(id, poll.clone());
+        (user_id, poll)
     }
     pub fn get_poll(&self, poll_id: &str) -> Option<Arc<Mutex<Poll>>> {
         self.polls.get(poll_id).cloned()
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct UserDetails {
+    pub ip: IpAddr,
+    pub id: Option<Uuid>,
+    // when we need to get usernames also:
+    // pub name: Option<String>,
+}
+
+trait UserCollection: Send + Sync {
+    fn search_user(&self, details: &UserDetails) -> Option<Uuid>;
+
+    fn get_map(&self) -> &HashMap<Uuid, PollUser>;
+    fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser>; // TODO do we need this?
+
+    fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError>;
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum UserLookupMethod {
+    IPBased,
+    SessionBased,
+}
+impl Into<Box<dyn UserCollection>> for UserLookupMethod {
+    fn into(self) -> Box<dyn UserCollection> {
+        match self {
+            UserLookupMethod::IPBased => Box::new(IPBasedUsers::new()) as Box<dyn UserCollection>,
+            UserLookupMethod::SessionBased => {
+                Box::new(PlainUsers::new()) as Box<dyn UserCollection>
+            }
+        }
+    }
+}
+
+struct PlainUsers {
+    users: HashMap<Uuid, PollUser>,
+}
+impl PlainUsers {
+    fn new() -> Self {
+        Self {
+            users: HashMap::new(),
+        }
+    }
+}
+impl UserCollection for PlainUsers {
+    fn search_user(&self, details: &UserDetails) -> Option<Uuid> {
+        match details.id {
+            Some(id) => match self.users.get(&id) {
+                Some(user) => Some(user.id),
+                None => None,
+            },
+            None => None,
+        }
+    }
+
+    fn get_map(&self) -> &HashMap<Uuid, PollUser> {
+        &self.users
+    }
+    fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser> {
+        &mut self.users
+    }
+
+    fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError> {
+        let id = self.users.generate_key();
+        self.users.insert(id, PollUser::new(id));
+        Ok(id)
+    }
+}
+
+struct IPBasedUsers {
+    users: HashMap<Uuid, PollUser>,
+    users_by_ip: HashMap<IpAddr, Uuid>,
+}
+impl IPBasedUsers {
+    fn new() -> Self {
+        Self {
+            users: HashMap::new(),
+            users_by_ip: HashMap::new(),
+        }
+    }
+}
+impl UserCollection for IPBasedUsers {
+    fn search_user(&self, details: &UserDetails) -> Option<Uuid> {
+        self.users_by_ip.get(&details.ip).cloned()
+    }
+
+    fn get_map(&self) -> &HashMap<Uuid, PollUser> {
+        &self.users
+    }
+    fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser> {
+        &mut self.users
+    }
+
+    fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError> {
+        if self.users_by_ip.get(&details.ip).is_some() {
+            return Err(UserCreateError::UserAlreadyExists);
+        }
+        let id = self.users.generate_key();
+        self.users.insert(id, PollUser::new(id));
+        self.users_by_ip.insert(details.ip, id);
+        Ok(id)
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PollSettings {
+    pub title: String,
+    pub user_lookup_method: UserLookupMethod,
+}
+
+struct PollUser {
+    id: Uuid,
+    // user may have opened multiple browser tabs to same poll
+    // this is because we have a vec here, insted of single sender
+    senders: Vec<mpsc::UnboundedSender<PollState>>,
+    // we may add UserDetails here to make easy to delete users from `UserLookup` implementations
+}
+impl PollUser {
+    fn new(id: Uuid) -> Self {
+        Self {
+            id,
+            senders: Vec::with_capacity(1),
+        }
+    }
+}
+
 pub struct Poll {
     id: String,
-    #[allow(dead_code)]
-    user_id: Uuid,
     title: String,
+    owner: Uuid, // user id
 
     // indicates that; some changes made and should be calculated & published on the next timer.tick
     changed: TouchTimed<bool>,
@@ -55,8 +185,8 @@ pub struct Poll {
     // id of item
     last_items: RingBuffer<usize>,
 
-    // connection number, channel sender for send events to user
-    audience: HashMap<Uuid, Vec<mpsc::UnboundedSender<PollState>>>,
+    users: Box<dyn UserCollection>,
+
     // this is an Option, because task created after this
     task: Option<JoinHandle<()>>,
     // TODO bu poll un artik kapanmasi gerektigini, poll HashMap'ine ileten bir channel gerek
@@ -83,18 +213,28 @@ async fn poll_worker(poll_mutex: Arc<Mutex<Poll>>) {
 }
 
 impl Poll {
-    fn new(id: String, user_id: Uuid, title: String) -> Arc<Mutex<Self>> {
-        let mut poll_raw = Self {
+    fn new(
+        id: String,
+        settings: PollSettings,
+        user_details: UserDetails,
+    ) -> (Arc<Mutex<Self>>, Uuid) {
+        // TODO why return an err if there is none
+        let mut users: Box<dyn UserCollection> = settings.user_lookup_method.into();
+        let owner_id = users
+            .create_user(user_details)
+            .expect("this is the first user that we create on this poll");
+
+        let poll_raw = Self {
             id,
-            user_id,
-            title,
+            owner: owner_id,
+            title: settings.title,
             changed: TouchTimed::new(false),
             value_range: -1..=1,
             items: HashMap::new(),
             items_by_score: BTreeSet::new(),
             items_by_user: HashMap::new(),
             last_items: RingBuffer::new(10),
-            audience: HashMap::new(),
+            users,
             task: None,
         };
         let poll = Arc::new(Mutex::new(poll_raw));
@@ -102,17 +242,44 @@ impl Poll {
         let task = tokio::spawn(poll_worker(poll.clone()));
         poll.lock().unwrap().task = Some(task);
 
-        poll
+        (poll, owner_id)
     }
 
-    pub fn add_viewer(&mut self, user_id: Uuid, user_sender: mpsc::UnboundedSender<PollState>) {
+    pub fn get_id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn join(
+        &mut self,
+        user_details: UserDetails,
+        user_sender: mpsc::UnboundedSender<PollState>,
+    ) -> Result<Uuid, JoinPollError> {
+        let user_id = if let Some(user_id) = self.users.search_user(&user_details) {
+            user_id
+        } else {
+            self.users
+                .create_user(user_details)
+                .expect("this user does not exists in poll")
+        };
+
         if !*self.changed.value() {
-            // TODO do better error handling; if we can't send this msg to callsite
-            // then we shouldn't add this user to audience
+            // no need to examine error here, because sender is going to be
+            // dropped on next broadcast if it's erroneous
             let _ = user_sender.send(self.get_state(&user_id));
         }
-        self.audience.insert_vec(user_id, user_sender);
+        self.users
+            .get_map_mut()
+            .get_mut(&user_id)
+            .expect("we just got/created this user")
+            .senders
+            .push(user_sender);
+
+        // TODO return a UserDetails instead
+        Ok(user_id)
     }
+
+    // we don't need to check validity of `user_id` on add_item() & vote_item()
+    // because, in order to use these method, they need to call join first
 
     pub fn add_item(&mut self, user_id: Uuid, item_text: String) -> usize {
         let item_id = self.items.len();
@@ -135,10 +302,14 @@ impl Poll {
         item_id
     }
 
-    pub fn vote_item(&mut self, user_id: Uuid, item_id: usize, value: isize) {
+    pub fn vote_item(
+        &mut self,
+        user_id: Uuid,
+        item_id: usize,
+        value: isize,
+    ) -> Result<(), VotePollItemError> {
         if !self.value_range.contains(&value) {
-            // TODO we can create an error type for this
-            return;
+            return Err(VotePollItemError::InvalidValue);
         }
         if let Some(item) = self.items.get_mut(&item_id) {
             let old_score = item.score;
@@ -158,8 +329,9 @@ impl Poll {
                 self.changed.update(true);
             }
         } else {
-            // TODO return error
+            return Err(VotePollItemError::ItemNotFound);
         }
+        Ok(())
     }
 
     fn get_state(&self, user_id: &Uuid) -> PollState {
@@ -189,15 +361,23 @@ impl Poll {
     }
 
     fn broadcast(&mut self) {
-        let all_users: Vec<Uuid> = self.audience.keys().map(|u| *u).collect();
+        let all_users: Vec<Uuid> = self.users.get_map().keys().copied().collect();
         for user_id in all_users.iter() {
             let state = self.get_state(user_id);
-            let user_senders = self.audience.get_mut(user_id).expect("this should exists");
-            user_senders.retain(|sender| match sender.send(state.clone()) {
-                Ok(_) => true,
-                Err(_) => false,
-            });
+            self.users
+                .get_map_mut()
+                .get_mut(user_id)
+                .expect("user exists because we iterate same map")
+                .senders
+                .retain(|sender| sender.send(state.clone()).is_ok());
         }
+        /*
+        for (user_id, user) in self.users.get_map_mut().iter_mut() {
+            let state = self.get_state(user_id);
+            user.senders
+                .retain(|sender| sender.send(state.clone()).is_ok());
+        }
+        */
         self.changed.update(false);
     }
 }
@@ -223,4 +403,26 @@ impl Item {
             user_vote: *self.votes.get(user_id).unwrap_or(&0),
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum UserCreateError {
+    #[error("You can't add this user to poll, this user already exists.")]
+    UserAlreadyExists,
+    // TODO add not enough details provided error
+}
+
+#[derive(Debug, Error)]
+pub enum JoinPollError {
+    #[error("You never joined this poll before, you need to provide a username to join.")]
+    UserUnknown,
+}
+
+#[derive(Debug, Error)]
+pub enum VotePollItemError {
+    // TODO add more info fields to this enum branch
+    #[error("Provided vote value is invalid for this poll item.")]
+    InvalidValue,
+    #[error("No such item exists with this item ID.")]
+    ItemNotFound,
 }

@@ -1,19 +1,35 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+pub fn rand_string(length: usize) -> String {
+    use rand::distributions::{Alphanumeric, DistString};
+    Alphanumeric.sample_string(&mut rand::thread_rng(), length)
+}
 
 pub trait StringKeyGenerate {
     fn generate_key(&self, length: usize) -> String;
 }
 impl<V> StringKeyGenerate for HashMap<String, V> {
     fn generate_key(&self, length: usize) -> String {
-        use rand::distributions::{Alphanumeric, DistString};
         let mut key: String;
         loop {
-            key = Alphanumeric.sample_string(&mut rand::thread_rng(), length);
+            key = rand_string(length);
             if !self.contains_key(&key) {
+                break;
+            }
+        }
+        key
+    }
+}
+impl StringKeyGenerate for HashSet<String> {
+    fn generate_key(&self, length: usize) -> String {
+        let mut key: String;
+        loop {
+            key = rand_string(length);
+            if !self.contains(&key) {
                 break;
             }
         }
