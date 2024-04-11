@@ -2,9 +2,7 @@ mod models;
 mod utils;
 mod views;
 
-use axum::response::IntoResponse;
-use axum::{http, middleware, response, routing};
-use rust_embed::RustEmbed;
+use axum::{http, middleware, routing};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::{self, signal};
@@ -14,54 +12,26 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub const SESSION_KEY: &str = "anket_session";
 pub const SESSION_DURATION: cookie::time::Duration = cookie::time::Duration::weeks(52);
 
-#[derive(RustEmbed)]
-#[folder = "../frontend/dist/"]
-struct StaticFiles;
-
-async fn static_handler(uri: http::uri::Uri, config: AppConfig) -> response::Response {
-    let path = uri.path().trim_start_matches('/');
-    if path == "globals.js" {
-        let hostd = config.host;
-        let globals_js_content = format!(
-            "\
-var ANKET_HOST = \"{}\";
-var ANKET_SECURE = {};
-",
-            hostd.host(),
-            hostd.secure
-        );
-        return (
-            [(
-                http::header::CONTENT_TYPE,
-                mime_guess::mime::APPLICATION_JAVASCRIPT.as_ref(),
-            )],
-            globals_js_content,
-        )
-            .into_response();
-    }
-    let (mime, content) = match StaticFiles::get(path) {
-        Some(content) => (mime_guess::from_path(path).first_or_octet_stream(), content),
-        None => (
-            mime_guess::mime::TEXT_HTML,
-            StaticFiles::get("index.html")
-                .expect("at least an index.html file expected in StaticFiles"),
-        ),
-    };
-    ([(http::header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
-}
-
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<AppConfig>,
     polls: Arc<Mutex<models::Polls>>,
+    templates: minijinja::Environment<'static>,
 }
 
 impl AppState {
     fn init(config: AppConfig) -> Self {
         let polls = models::Polls::new();
+        let templates = {
+            let mut env = minijinja::Environment::new();
+            minijinja_embed::load_templates!(&mut env);
+            env
+        };
+
         Self {
             config: Arc::new(config),
             polls: Arc::new(Mutex::new(polls)),
+            templates,
         }
     }
 }
@@ -190,6 +160,7 @@ async fn main() {
             app_state.clone(),
             views::identify_user,
         ))
+        .nest("/assets", views::assets_router(app_state.clone()))
         .with_state(app_state);
 
     // TODO add handlers to custom errors like; 404, Failed to deserialize form body

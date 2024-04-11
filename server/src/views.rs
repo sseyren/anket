@@ -5,11 +5,12 @@ use axum::{
     extract::{ws, ConnectInfo, Extension, Path, State},
     http::{header::HeaderMap, Request, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
-    Form,
+    response::{Html, IntoResponse, Response},
+    routing, Form,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use minijinja::context;
 use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -21,7 +22,6 @@ use uuid::Uuid;
 
 // TODO transform this into tower middleware
 pub async fn identify_user<B>(
-    State(state): State<AppState>,
     ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
@@ -43,25 +43,39 @@ pub async fn identify_user<B>(
         };
         models::UserDetails { ip, id }
     };
-
     request.extensions_mut().insert(user);
     next.run(request).await
 }
 
-const template_form: &str = r#"
-<form method="POST">
-    <input type="text" name="title" />
-    <select name="user_lookup_method">
-        <option value="SessionBased">Session Based</option>
-        <option value="IPBased">IP Based</option>
-    </select>
+pub fn assets_router(state: AppState) -> routing::Router<AppState> {
+    routing::Router::new()
+        .route(
+            "/anket.css",
+            routing::get(|State(state): State<AppState>| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/css")],
+                    state
+                        .templates
+                        .get_template("anket.css")
+                        .unwrap()
+                        .render(context!())
+                        .unwrap(),
+                )
+            }),
+        )
+        .with_state(state)
+}
 
-    <input type="submit" value="Create Poll">
-</form>
-"#;
-
-pub async fn poll_index() -> Response {
-    axum::response::Html(template_form).into_response()
+pub async fn poll_index(State(state): State<AppState>) -> Response {
+    Html(
+        state
+            .templates
+            .get_template("poll-form.jinja")
+            .unwrap()
+            .render(context!())
+            .unwrap(),
+    )
+    .into_response()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

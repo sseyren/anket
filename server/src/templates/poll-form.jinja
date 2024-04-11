@@ -1,0 +1,23 @@
+{% extends "base.jinja" %}
+
+{% block body %}
+<div class="pure-g">
+  <div class="pure-u-1 text-center">
+    <h1>Anket</h1>
+    <form class="pure-form" method="post">
+      <fieldset class="pure-group">
+        <input name="title" type="text" class="pure-input-3-4 margin-auto" placeholder="Poll title" />
+        <select name="user_lookup_method">
+          <option value="SessionBased">Session Based</option>
+          <option value="IPBased">IP Based</option>
+        </select>
+      </fieldset>
+      <fieldset class="pure-group">
+        <button type="submit" class="pure-button pure-input-1-4 pure-button-primary margin-auto">
+          Create Poll
+        </button>
+      </fieldset>
+    </form>
+  </div>
+</div>
+{% endblock %}
