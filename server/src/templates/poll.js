@@ -17,6 +17,19 @@ function anket_initCanvas() {
     anket.canvas.self.innerHTML = anket_HTML.canvas_init;
     anket.canvas.title = anket.canvas.self.querySelector("#anket-pollTitle");
 
+    anket.canvas.form = anket.canvas.self.querySelector("#anket-pollForm");
+    anket.canvas.form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var input = anket.canvas.form.querySelector("#anket-itemText");
+        if (input.value.length > 0) {
+            anket.socket.send(JSON.stringify({
+                type: "AddItem",
+                content: { text: input.value },
+            }));
+        }
+        input.value = "";
+    });
+
     anket.canvas.top_items = anket.canvas.self.querySelector("#anket-itemsTop");
     anket.canvas.latest_items = anket.canvas.self.querySelector("#anket-itemsLatest");
     anket.canvas.user_items = anket.canvas.self.querySelector("#anket-itemsUser");
@@ -93,6 +106,7 @@ function anket_main() {
         switch (data.type) {
             case "ActionResponse":
                 alert(data.content);
+                break;
 
             case "PollStateUpdate":
                 anket.canvas.title.innerText = data.content.poll_title;
@@ -110,10 +124,10 @@ var anket_HTML = {
 <div class="pure-g">
   <div class="pure-u-1">
     <h1 id="anket-pollTitle"></h1>
-    <form class="pure-form">
+    <form id="anket-pollForm" class="pure-form">
       <fieldset>
         <legend>Create an option for this poll</legend>
-        <input class="pure-input-3-4" type="text" placeholder="Option text" />
+        <input id="anket-itemText" type="text" class="pure-input-3-4" placeholder="Option text" />
         <button type="submit" class="pure-button pure-input-1-4 pure-button-primary">
           Create
         </button>
