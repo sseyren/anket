@@ -1,11 +1,10 @@
 use crate::{models, utils, AppState, SESSION_DURATION, SESSION_KEY};
 
 use axum::{
-    body,
     extract::{ws, ConnectInfo, Extension, Path, State},
     http::{header::HeaderMap, Request, StatusCode},
     middleware,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing, Form,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
@@ -24,7 +23,7 @@ use uuid::Uuid;
 pub async fn identify_user<B>(
     ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    jar: CookieJar,
+    cookies: CookieJar,
     mut request: Request<B>,
     next: middleware::Next<B>,
 ) -> Response {
@@ -37,7 +36,7 @@ pub async fn identify_user<B>(
             },
             None => socket_addr.ip(),
         };
-        let id = match jar.get(SESSION_KEY) {
+        let id = match cookies.get(SESSION_KEY) {
             Some(cookie) => Uuid::from_str(cookie.value()).ok(),
             None => None,
         };
@@ -57,6 +56,20 @@ pub fn assets_router(state: AppState) -> routing::Router<AppState> {
                     state
                         .templates
                         .get_template("anket.css")
+                        .unwrap()
+                        .render(context!())
+                        .unwrap(),
+                )
+            }),
+        )
+        .route(
+            "/poll.js",
+            routing::get(|State(state): State<AppState>| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+                    state
+                        .templates
+                        .get_template("poll.js")
                         .unwrap()
                         .render(context!())
                         .unwrap(),
@@ -87,87 +100,149 @@ pub struct CreatePollReq {
 pub async fn create_poll(
     State(state): State<AppState>,
     Extension(user): Extension<models::UserDetails>,
-    cookie_jar: CookieJar,
+    cookies: CookieJar,
     Form(form): Form<CreatePollReq>,
 ) -> Response {
-    // TODO return an actual response for this
-    if form.settings.title.len() < 2 {
-        return StatusCode::BAD_REQUEST.into_response();
+    let mut error = None;
+    if form.settings.title.len() < 3 {
+        error = Some("Poll title must be at least 3 characters long.");
     }
 
     let (user_id, poll) = state.polls.lock().unwrap().add_poll(form.settings, user);
-    let poll_id = poll.lock().unwrap().get_id().to_owned();
 
-    let cookie_jar = cookie_jar.add(
-        Cookie::build(SESSION_KEY, user_id.to_string())
-            .max_age(SESSION_DURATION)
-            .http_only(false)
-            .path(format!("{}poll/{}", state.config.host.path, poll_id)) // TODO bug when using / as path value // TODO use const vars for path
-            .secure(state.config.host.secure)
-            .finish(),
-    );
+    match error {
+        Some(msg) => Html(
+            state
+                .templates
+                .get_template("poll-form.jinja")
+                .unwrap()
+                .render(context!(error => msg))
+                .unwrap(),
+        )
+        .into_response(),
+        None => {
+            let poll_id = poll.lock().unwrap().get_id().to_owned();
+            let cookies = cookies.add(
+                Cookie::build(SESSION_KEY, user_id.to_string())
+                    .max_age(SESSION_DURATION)
+                    .http_only(false)
+                    .path(format!("{}p/{}", state.config.host.path, poll_id)) // TODO bug when using / as path value // TODO use const vars for path
+                    .secure(state.config.host.secure)
+                    .finish(),
+            );
+            (cookies, Redirect::to(&format!("/p/{}", poll_id))).into_response()
+        }
+    }
+}
 
-    (
-        cookie_jar,
-        axum::response::Html(format!(r#"<h1>Poll created. Poll ID: {}</h1>"#, poll_id)),
-    )
-        .into_response()
+pub async fn get_poll(State(state): State<AppState>, Path(poll_id): Path<String>) -> Response {
+    match state.polls.lock().unwrap().get_poll(&poll_id) {
+        Some(_) => Html(
+            state
+                .templates
+                .get_template("poll.jinja")
+                .unwrap()
+                .render(context!())
+                .unwrap(),
+        )
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // TODO don't forget to return cookie in response
-pub async fn poll_events(
+pub async fn join_poll(
     State(state): State<AppState>,
     Extension(user): Extension<models::UserDetails>,
     Path(poll_id): Path<String>,
     ws: ws::WebSocketUpgrade,
 ) -> Response {
-    let (user_sender, user_receiver) = mpsc::unbounded_channel();
-
+    // TODO buralardaki unlock() larda lock u yanlislikla birakamama ile ilgili biseyler yasaniyor olabilir mi?
     let poll = state.polls.lock().unwrap().get_poll(&poll_id);
     match poll {
         Some(poll) => {
-            // TODO remove unwrap
-            let user_id = poll.lock().unwrap().join(user, user_sender).unwrap();
-            ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver))
+            let (user_sender, user_receiver) = mpsc::unbounded_channel();
+            let user_id = poll.lock().unwrap().join(user, user_sender.clone());
+            ws.on_upgrade(move |socket| {
+                events_handler(socket, user_id, poll, user_sender, user_receiver)
+            })
         }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(body::boxed(body::Empty::new()))
-            .expect("should be able to create empty response"),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", content = "content")]
+pub enum UserMessage {
+    AddItem { text: String },
+    VoteItem { item_id: usize, vote: isize },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", content = "content")]
+pub enum UserResponse {
+    ActionResponse(String),
+    PollStateUpdate(models::PollState),
+}
+
+impl Into<ws::Message> for UserResponse {
+    fn into(self) -> ws::Message {
+        ws::Message::Text(serde_json::to_string(&self).expect("PollState should serialize"))
     }
 }
 
 async fn events_handler(
     socket: ws::WebSocket,
     user_id: Uuid,
-    poll: Arc<Mutex<crate::models::Poll>>,
-    mut user_receiver: mpsc::UnboundedReceiver<anket_shared::PollState>,
+    poll: Arc<Mutex<models::Poll>>,
+    user_sender: mpsc::UnboundedSender<UserResponse>,
+    mut user_receiver: mpsc::UnboundedReceiver<UserResponse>,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     let poll_task = tokio::spawn(async move {
-        while let Some(msg) = user_receiver.recv().await {
-            let wsmsg =
-                ws::Message::Text(serde_json::to_string(&msg).expect("PollState should serialize"));
-            if ws_sender.send(wsmsg).await.is_err() {
+        while let Some(state) = user_receiver.recv().await {
+            let send = ws_sender.send(state.into()).await;
+            if send.is_err() {
                 break;
             }
         }
     });
+
     let user_task = tokio::spawn(async move {
         while let Some(wsmsg) = ws_receiver.next().await {
             if let Ok(ws::Message::Text(text)) = wsmsg {
-                if let Ok(msg) = serde_json::from_str::<anket_shared::Message>(&text) {
+                if let Ok(msg) = serde_json::from_str::<UserMessage>(&text) {
                     match msg {
-                        anket_shared::Message::AddItem { text } => {
-                            poll.lock().unwrap().add_item(user_id, text);
+                        UserMessage::AddItem { text } => {
+                            if text.is_empty() {
+                                let resp = UserResponse::ActionResponse(
+                                    "Poll item text cannot be empty.".to_string(),
+                                );
+                                if user_sender.send(resp.into()).is_err() {
+                                    break;
+                                }
+                            } else {
+                                poll.lock().unwrap().add_item(user_id, text);
+                            }
                         }
-                        anket_shared::Message::VoteItem { item_id, vote } => {
-                            poll.lock().unwrap().vote_item(user_id, item_id, vote);
+                        UserMessage::VoteItem { item_id, vote } => {
+                            let vote = poll.lock().unwrap().vote_item(user_id, item_id, vote);
+                            if let Err(err) = vote {
+                                let resp = UserResponse::ActionResponse(err.to_string());
+                                if user_sender.send(resp.into()).is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 } else {
-                    // TODO we need to inform user
+                    let resp = UserResponse::ActionResponse(
+                        "Failed to deserialize client message.".to_string(),
+                    );
+                    if user_sender.send(resp.into()).is_err() {
+                        break;
+                    }
                 }
             } else if let Ok(ws::Message::Close(_)) = wsmsg {
                 // client disconnected

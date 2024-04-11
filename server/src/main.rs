@@ -152,10 +152,11 @@ async fn main() {
 
     let routes = routing::Router::new()
         .route(
-            "/poll",
+            "/p",
             routing::get(views::poll_index).post(views::create_poll),
         )
-        // .route("/poll/:id", routing::get(views::poll_events))
+        .route("/p/:id", routing::get(views::get_poll))
+        .route("/p/:id/ws", routing::get(views::join_poll))
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
             views::identify_user,

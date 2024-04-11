@@ -1,7 +1,5 @@
 use crate::utils::{HashMapVecInsert, RingBuffer, StringKeyGenerate, TouchTimed, UuidKeyGenerate};
 
-use anket_shared::{ItemState, PollState};
-
 // TODO remove async_trait dep
 use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
@@ -154,7 +152,7 @@ struct PollUser {
     id: Uuid,
     // user may have opened multiple browser tabs to same poll
     // this is because we have a vec here, insted of single sender
-    senders: Vec<mpsc::UnboundedSender<PollState>>,
+    senders: Vec<mpsc::UnboundedSender<crate::views::UserResponse>>,
     // we may add UserDetails here to make easy to delete users from `UserLookup` implementations
 }
 impl PollUser {
@@ -218,7 +216,6 @@ impl Poll {
         settings: PollSettings,
         user_details: UserDetails,
     ) -> (Arc<Mutex<Self>>, Uuid) {
-        // TODO why return an err if there is none
         let mut users: Box<dyn UserCollection> = settings.user_lookup_method.into();
         let owner_id = users
             .create_user(user_details)
@@ -252,8 +249,8 @@ impl Poll {
     pub fn join(
         &mut self,
         user_details: UserDetails,
-        user_sender: mpsc::UnboundedSender<PollState>,
-    ) -> Result<Uuid, JoinPollError> {
+        user_sender: mpsc::UnboundedSender<crate::views::UserResponse>,
+    ) -> Uuid {
         let user_id = if let Some(user_id) = self.users.search_user(&user_details) {
             user_id
         } else {
@@ -275,7 +272,7 @@ impl Poll {
             .push(user_sender);
 
         // TODO return a UserDetails instead
-        Ok(user_id)
+        user_id
     }
 
     // we don't need to check validity of `user_id` on add_item() & vote_item()
@@ -334,8 +331,8 @@ impl Poll {
         Ok(())
     }
 
-    fn get_state(&self, user_id: &Uuid) -> PollState {
-        PollState {
+    fn get_state(&self, user_id: &Uuid) -> crate::views::UserResponse {
+        crate::views::UserResponse::PollStateUpdate(PollState {
             poll_title: self.title.clone(),
             top_items: self
                 .items_by_score
@@ -357,7 +354,7 @@ impl Poll {
                 .rev()
                 .map(|item_id| self.items.get(item_id).unwrap().to_state(user_id))
                 .collect(),
-        }
+        })
     }
 
     fn broadcast(&mut self) {
@@ -405,17 +402,27 @@ impl Item {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ItemState {
+    pub id: usize,
+    pub text: String,
+    pub score: isize,
+    pub user_vote: isize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PollState {
+    pub poll_title: String,
+    pub top_items: Vec<ItemState>,
+    pub latest_items: Vec<ItemState>,
+    pub user_items: Vec<ItemState>,
+}
+
 #[derive(Debug, Error)]
 pub enum UserCreateError {
     #[error("You can't add this user to poll, this user already exists.")]
     UserAlreadyExists,
     // TODO add not enough details provided error
-}
-
-#[derive(Debug, Error)]
-pub enum JoinPollError {
-    #[error("You never joined this poll before, you need to provide a username to join.")]
-    UserUnknown,
 }
 
 #[derive(Debug, Error)]
