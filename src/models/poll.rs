@@ -6,21 +6,32 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
 pub struct Polls {
     // HashMap<poll id, poll>
     polls: HashMap<String, Arc<Mutex<Poll>>>,
+
+    close_ch: mpsc::UnboundedSender<String>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Polls {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Arc<Mutex<Self>> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let polls_raw = Self {
             polls: HashMap::new(),
-        }
+            close_ch: sender,
+            task: None,
+        };
+        let polls = Arc::new(Mutex::new(polls_raw));
+
+        let task = tokio::spawn(polls_worker(polls.clone(), receiver));
+        polls.lock().unwrap().task = Some(task);
+
+        polls
     }
     pub fn add_poll(
         &mut self,
@@ -28,12 +39,27 @@ impl Polls {
         user_details: UserDetails,
     ) -> (Uuid, Arc<Mutex<Poll>>) {
         let id = self.polls.generate_key(8);
-        let (poll, user_id) = Poll::new(id.clone(), settings, user_details);
+        let (poll, user_id) = Poll::new(id.clone(), settings, user_details, self.close_ch.clone());
         self.polls.insert(id, poll.clone());
         (user_id, poll)
     }
     pub fn get_poll(&self, poll_id: &str) -> Option<Arc<Mutex<Poll>>> {
         self.polls.get(poll_id).cloned()
+    }
+}
+
+impl Drop for Polls {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+async fn polls_worker(polls: Arc<Mutex<Polls>>, mut close_recv: mpsc::UnboundedReceiver<String>) {
+    while let Some(poll_id) = close_recv.recv().await {
+        polls.lock().unwrap().polls.remove(&poll_id);
+        // TODO debug! if poll_id is unknown
     }
 }
 
@@ -47,11 +73,10 @@ pub struct UserDetails {
 
 trait UserCollection: Send + Sync {
     fn search_user(&self, details: &UserDetails) -> Option<Uuid>;
-
     fn get_map(&self) -> &HashMap<Uuid, PollUser>;
     fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser>;
-
     fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError>;
+    fn clear(&mut self);
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -103,6 +128,10 @@ impl UserCollection for PlainUsers {
         self.users.insert(id, PollUser::new(id));
         Ok(id)
     }
+
+    fn clear(&mut self) {
+        self.users.clear();
+    }
 }
 
 struct IPBasedUsers {
@@ -137,6 +166,11 @@ impl UserCollection for IPBasedUsers {
         self.users.insert(id, PollUser::new(id));
         self.users_by_ip.insert(details.ip, id);
         Ok(id)
+    }
+
+    fn clear(&mut self) {
+        self.users_by_ip.clear();
+        self.users.clear();
     }
 }
 
@@ -184,11 +218,10 @@ pub struct Poll {
     users: Box<dyn UserCollection>,
 
     // this is an Option, because task created after this
-    task: Option<JoinHandle<()>>,
-    // TODO bu poll un artik kapanmasi gerektigini, poll HashMap'ine ileten bir channel gerek
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
-async fn poll_worker(poll_mutex: Arc<Mutex<Poll>>) {
+async fn poll_worker(poll_mutex: Arc<Mutex<Poll>>, close_ch: mpsc::UnboundedSender<String>) {
     let mut timer = tokio::time::interval(Duration::from_millis(500));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -202,10 +235,11 @@ async fn poll_worker(poll_mutex: Arc<Mutex<Poll>>) {
             poll.broadcast();
         } else if poll.changed.elapsed() > Duration::from_secs(15 * 60) {
             debug!("{} is inactive, worker stops", poll.id);
+            poll.users.clear();
+            let _ = close_ch.send(poll.id.clone());
             break;
         }
     }
-    // TODO bu poll un kapatilmasi gerektigini channel'dan bildir
 }
 
 impl Poll {
@@ -213,6 +247,7 @@ impl Poll {
         id: String,
         settings: PollSettings,
         user_details: UserDetails,
+        close_ch: mpsc::UnboundedSender<String>,
     ) -> (Arc<Mutex<Self>>, Uuid) {
         let mut users: Box<dyn UserCollection> = settings.user_lookup_method.into();
         let owner_id = users
@@ -234,7 +269,7 @@ impl Poll {
         };
         let poll = Arc::new(Mutex::new(poll_raw));
 
-        let task = tokio::spawn(poll_worker(poll.clone()));
+        let task = tokio::spawn(poll_worker(poll.clone(), close_ch));
         poll.lock().unwrap().task = Some(task);
 
         (poll, owner_id)
@@ -249,6 +284,7 @@ impl Poll {
         user_details: UserDetails,
         user_sender: mpsc::UnboundedSender<PollState>,
     ) -> Uuid {
+        // TODO make this func failable; return err if self.task finished
         let user_id = if let Some(user_id) = self.users.search_user(&user_details) {
             user_id
         } else {

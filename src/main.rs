@@ -30,7 +30,7 @@ impl AppState {
 
         Self {
             config: Arc::new(config),
-            polls: Arc::new(Mutex::new(polls)),
+            polls: polls,
             templates,
         }
     }
