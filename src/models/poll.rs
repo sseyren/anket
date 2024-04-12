@@ -1,7 +1,5 @@
 use crate::utils::{HashMapVecInsert, RingBuffer, StringKeyGenerate, TouchTimed, UuidKeyGenerate};
 
-// TODO remove async_trait dep
-use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;

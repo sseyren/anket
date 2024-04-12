@@ -30,7 +30,6 @@ dependencies = [
 name = "anket"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "axum-extra",
  "cookie 0.18.0",
