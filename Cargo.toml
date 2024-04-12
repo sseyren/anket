@@ -1,3 +1,30 @@
-[workspace]
-members = ["frontend", "server", "shared"]
-resolver = "2"
+[package]
+name = "anket"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rand = "0.8.5"
+uuid = {version = "1.4.1", features = ["v4"]}
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3.28"
+async-trait = "0.1.74"
+
+axum = { version = "0.6.20", features = ["ws"] }
+axum-extra = { version = "0.8", features = ["cookie"] }
+hyper = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"]}
+tower = "0.4"
+cookie = "0.18.0"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+minijinja = "1"
+minijinja-embed = "1"
+
+[build-dependencies]
+minijinja-embed = "1"
