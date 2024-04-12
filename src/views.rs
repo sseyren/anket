@@ -162,10 +162,8 @@ pub async fn join_poll(
     match poll {
         Some(poll) => {
             let (user_sender, user_receiver) = mpsc::unbounded_channel();
-            let user_id = poll.lock().unwrap().join(user, user_sender.clone());
-            ws.on_upgrade(move |socket| {
-                events_handler(socket, user_id, poll, user_sender, user_receiver)
-            })
+            let user_id = poll.lock().unwrap().join(user, user_sender);
+            ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver))
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -191,23 +189,47 @@ impl Into<ws::Message> for UserResponse {
     }
 }
 
+fn websocket_worker(
+    mut sender: futures_util::stream::SplitSink<ws::WebSocket, ws::Message>,
+) -> (
+    tokio::task::JoinHandle<Result<(), axum::Error>>,
+    mpsc::UnboundedSender<ws::Message>,
+) {
+    let (task_sender, mut task_receiver) = mpsc::unbounded_channel();
+
+    let task = tokio::spawn(async move {
+        while let Some(message) = task_receiver.recv().await {
+            if let Err(error) = sender.send(message).await {
+                return Err(error);
+            }
+        }
+        Ok(())
+    });
+
+    (task, task_sender)
+}
+
 async fn events_handler(
     socket: ws::WebSocket,
     user_id: Uuid,
     poll: Arc<Mutex<models::Poll>>,
-    user_sender: mpsc::UnboundedSender<UserResponse>,
-    mut user_receiver: mpsc::UnboundedReceiver<UserResponse>,
+    mut user_receiver: mpsc::UnboundedReceiver<models::PollState>,
 ) {
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (ws_sender, mut ws_receiver) = socket.split();
+    let (ws_task, ws_sender) = websocket_worker(ws_sender);
 
-    let poll_task = tokio::spawn(async move {
-        while let Some(state) = user_receiver.recv().await {
-            let send = ws_sender.send(state.into()).await;
-            if send.is_err() {
-                break;
+    let poll_task = {
+        let ws_sender = ws_sender.clone();
+        tokio::spawn(async move {
+            while let Some(state) = user_receiver.recv().await {
+                let msg = UserResponse::PollStateUpdate(state);
+                let send = ws_sender.send(msg.into());
+                if send.is_err() {
+                    break;
+                }
             }
-        }
-    });
+        })
+    };
 
     let user_task = tokio::spawn(async move {
         while let Some(wsmsg) = ws_receiver.next().await {
@@ -219,7 +241,7 @@ async fn events_handler(
                                 let resp = UserResponse::ActionResponse(
                                     "Poll item text cannot be empty.".to_string(),
                                 );
-                                if user_sender.send(resp.into()).is_err() {
+                                if ws_sender.send(resp.into()).is_err() {
                                     break;
                                 }
                             } else {
@@ -230,7 +252,7 @@ async fn events_handler(
                             let vote = poll.lock().unwrap().vote_item(user_id, item_id, vote);
                             if let Err(err) = vote {
                                 let resp = UserResponse::ActionResponse(err.to_string());
-                                if user_sender.send(resp.into()).is_err() {
+                                if ws_sender.send(resp.into()).is_err() {
                                     break;
                                 }
                             }
@@ -240,7 +262,7 @@ async fn events_handler(
                     let resp = UserResponse::ActionResponse(
                         "Failed to deserialize client message.".to_string(),
                     );
-                    if user_sender.send(resp.into()).is_err() {
+                    if ws_sender.send(resp.into()).is_err() {
                         break;
                     }
                 }
@@ -256,13 +278,20 @@ async fn events_handler(
 
     let poll_handle = poll_task.abort_handle();
     let user_handle = user_task.abort_handle();
+    let ws_handle = ws_task.abort_handle();
 
     tokio::select! {
         _ = poll_task => {
             user_handle.abort();
+            ws_handle.abort();
         }
         _ = user_task => {
             poll_handle.abort();
+            ws_handle.abort();
+        }
+        _ = ws_task => {
+            poll_handle.abort();
+            user_handle.abort();
         }
     }
 }

@@ -49,7 +49,7 @@ trait UserCollection: Send + Sync {
     fn search_user(&self, details: &UserDetails) -> Option<Uuid>;
 
     fn get_map(&self) -> &HashMap<Uuid, PollUser>;
-    fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser>; // TODO do we need this?
+    fn get_map_mut(&mut self) -> &mut HashMap<Uuid, PollUser>;
 
     fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError>;
 }
@@ -150,7 +150,7 @@ struct PollUser {
     id: Uuid,
     // user may have opened multiple browser tabs to same poll
     // this is because we have a vec here, insted of single sender
-    senders: Vec<mpsc::UnboundedSender<crate::views::UserResponse>>,
+    senders: Vec<mpsc::UnboundedSender<PollState>>,
     // we may add UserDetails here to make easy to delete users from `UserLookup` implementations
 }
 impl PollUser {
@@ -247,7 +247,7 @@ impl Poll {
     pub fn join(
         &mut self,
         user_details: UserDetails,
-        user_sender: mpsc::UnboundedSender<crate::views::UserResponse>,
+        user_sender: mpsc::UnboundedSender<PollState>,
     ) -> Uuid {
         let user_id = if let Some(user_id) = self.users.search_user(&user_details) {
             user_id
@@ -329,8 +329,8 @@ impl Poll {
         Ok(())
     }
 
-    fn get_state(&self, user_id: &Uuid) -> crate::views::UserResponse {
-        crate::views::UserResponse::PollStateUpdate(PollState {
+    fn get_state(&self, user_id: &Uuid) -> PollState {
+        PollState {
             poll_title: self.title.clone(),
             top_items: self
                 .items_by_score
@@ -352,7 +352,7 @@ impl Poll {
                 .rev()
                 .map(|item_id| self.items.get(item_id).unwrap().to_state(user_id))
                 .collect(),
-        })
+        }
     }
 
     fn broadcast(&mut self) {
@@ -366,13 +366,6 @@ impl Poll {
                 .senders
                 .retain(|sender| sender.send(state.clone()).is_ok());
         }
-        /*
-        for (user_id, user) in self.users.get_map_mut().iter_mut() {
-            let state = self.get_state(user_id);
-            user.senders
-                .retain(|sender| sender.send(state.clone()).is_ok());
-        }
-        */
         self.changed.update(false);
     }
 }
