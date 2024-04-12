@@ -2,7 +2,8 @@ mod models;
 mod utils;
 mod views;
 
-use axum::{http, middleware, routing};
+use axum::{middleware, routing};
+use std::borrow::Borrow;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::{self, signal};
@@ -37,80 +38,27 @@ impl AppState {
 }
 
 #[derive(Clone, Debug)]
-struct HostDetails {
-    secure: bool,
-    hostname: String,
-    path: String,
-    port: Option<u16>,
-}
-
-impl HostDetails {
-    fn host(&self) -> String {
-        match self.port {
-            Some(port) => format!("{}:{}", self.hostname, port),
-            None => self.hostname.clone(),
-        }
-    }
-}
-
-// TODO burada yer alan bazi seylere artik ihtiyacimiz kalmamis olabilir
-#[derive(Clone, Debug)]
 struct AppConfig {
-    host: HostDetails,
     bind_addr: SocketAddr,
-    user_ip_lookup: bool,
+    secure: bool,
 }
 
 fn get_config() -> AppConfig {
-    let root_uri = std::env::var("ANKET_ROOT")
-        .expect("ANKET_ROOT env variable must be set")
-        .parse::<http::uri::Uri>()
-        .expect("ANKET_ROOT is not a valid URI");
-
-    let secure = if root_uri.scheme() == Some(&http::uri::Scheme::HTTPS) {
-        true
-    } else if root_uri.scheme() == Some(&http::uri::Scheme::HTTP) {
-        false
-    } else {
-        panic!("ANKET_ROOT URI does not have a valid scheme");
-    };
-
-    let mut hostname = "".to_string();
-    root_uri
-        .host()
-        .expect("ANKET_ROOT URI does not have a valid hostname")
-        .clone_into(&mut hostname);
-
-    let mut path = "/".to_string();
-    root_uri.path().clone_into(&mut path);
-
-    let port = root_uri.port_u16();
-
     let bind_addr = std::env::var("ANKET_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:3000".into())
         .parse::<SocketAddr>()
         .expect("ANKET_LISTEN is not a valid socket address");
 
-    let user_ip_lookup = match std::env::var("ANKET_IP_LOOKUP")
+    let secure = match std::env::var("ANKET_SECURE")
         .unwrap_or_else(|_| "0".into())
-        .parse::<usize>()
-        .expect("ANKET_IP_LOOKUP is not valid; it can be 0 or 1")
+        .borrow()
     {
-        0 => false,
-        1 => true,
-        _ => panic!("ANKET_IP_LOOKUP is not valid; it can be 0 or 1"),
+        "0" => false,
+        "1" => true,
+        _ => panic!("ANKET_SECURE can be 0 or 1"),
     };
 
-    AppConfig {
-        host: HostDetails {
-            secure,
-            hostname,
-            path,
-            port,
-        },
-        bind_addr,
-        user_ip_lookup,
-    }
+    AppConfig { bind_addr, secure }
 }
 
 async fn shutdown_signal() {

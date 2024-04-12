@@ -131,8 +131,8 @@ pub async fn create_poll(
                 Cookie::build(SESSION_KEY, user_id.to_string())
                     .max_age(SESSION_DURATION)
                     .http_only(false)
-                    .path(format!("{}p/{}", state.config.host.path, poll_id)) // TODO bug when using / as path value // TODO use const vars for path
-                    .secure(state.config.host.secure)
+                    .path(format!("/p/{}", poll_id))
+                    .secure(state.config.secure)
                     .finish(),
             );
             (cookies, Redirect::to(&format!("/p/{}", poll_id))).into_response()
