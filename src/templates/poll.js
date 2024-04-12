@@ -13,6 +13,11 @@ function anket_getPollID() {
     return urlArr[1];
 }
 
+function anket_getWSUrl(pollID) {
+    var scheme = (window.location.protocol == "https:") ? "wss" : "ws";
+    return `${scheme}://${window.location.host}/p/${pollID}/ws`;
+}
+
 function anket_initCanvas() {
     anket.canvas.self.innerHTML = anket_HTML.canvas_init;
     anket.canvas.title = anket.canvas.self.querySelector("#anket-pollTitle");
@@ -87,7 +92,7 @@ function anket_main() {
     var pollID = anket_getPollID();
 
     anket.canvas.self.innerHTML = "<p>connecting to poll...</p>";
-    anket.socket = new WebSocket(`/p/${pollID}/ws`);
+    anket.socket = new WebSocket(anket_getWSUrl(pollID));
 
     anket.socket.addEventListener("close", function (event) {
         alert("websocket connection closed");

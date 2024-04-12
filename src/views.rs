@@ -234,34 +234,33 @@ async fn events_handler(
     let user_task = tokio::spawn(async move {
         while let Some(wsmsg) = ws_receiver.next().await {
             if let Ok(ws::Message::Text(text)) = wsmsg {
-                if let Ok(msg) = serde_json::from_str::<UserMessage>(&text) {
-                    match msg {
+                let response = match serde_json::from_str::<UserMessage>(&text) {
+                    Ok(msg) => match msg {
                         UserMessage::AddItem { text } => {
                             if text.is_empty() {
-                                let resp = UserResponse::ActionResponse(
+                                Some(UserResponse::ActionResponse(
                                     "Poll item text cannot be empty.".to_string(),
-                                );
-                                if ws_sender.send(resp.into()).is_err() {
-                                    break;
-                                }
+                                ))
                             } else {
-                                poll.lock().unwrap().add_item(user_id, text);
+                                poll.lock()
+                                    .unwrap()
+                                    .add_item(user_id, text)
+                                    .err()
+                                    .map(|err| UserResponse::ActionResponse(err.to_string()))
                             }
                         }
-                        UserMessage::VoteItem { item_id, vote } => {
-                            let vote = poll.lock().unwrap().vote_item(user_id, item_id, vote);
-                            if let Err(err) = vote {
-                                let resp = UserResponse::ActionResponse(err.to_string());
-                                if ws_sender.send(resp.into()).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let resp = UserResponse::ActionResponse(
+                        UserMessage::VoteItem { item_id, vote } => poll
+                            .lock()
+                            .unwrap()
+                            .vote_item(user_id, item_id, vote)
+                            .err()
+                            .map(|err| UserResponse::ActionResponse(err.to_string())),
+                    },
+                    Err(_) => Some(UserResponse::ActionResponse(
                         "Failed to deserialize client message.".to_string(),
-                    );
+                    )),
+                };
+                if let Some(resp) = response {
                     if ws_sender.send(resp.into()).is_err() {
                         break;
                     }

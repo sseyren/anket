@@ -174,10 +174,17 @@ impl UserCollection for IPBasedUsers {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AddItemPermit {
+    Anyone,
+    OwnerOnly,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PollSettings {
     pub title: String,
     pub user_lookup_method: UserLookupMethod,
+    pub add_item_permit: AddItemPermit,
 }
 
 struct PollUser {
@@ -205,6 +212,7 @@ pub struct Poll {
     changed: TouchTimed<bool>,
     // valid value range for a user item vote
     value_range: RangeInclusive<isize>,
+    add_item_permit: AddItemPermit,
 
     // item id, item
     items: HashMap<usize, Item>,
@@ -260,6 +268,7 @@ impl Poll {
             title: settings.title,
             changed: TouchTimed::new(false),
             value_range: -1..=1,
+            add_item_permit: settings.add_item_permit,
             items: HashMap::new(),
             items_by_score: BTreeSet::new(),
             items_by_user: HashMap::new(),
@@ -312,7 +321,15 @@ impl Poll {
     // we don't need to check validity of `user_id` on add_item() & vote_item()
     // because, in order to use these method, they need to call join first
 
-    pub fn add_item(&mut self, user_id: Uuid, item_text: String) -> usize {
+    pub fn add_item(
+        &mut self,
+        user_id: Uuid,
+        item_text: String,
+    ) -> Result<usize, AddPollItemError> {
+        if self.add_item_permit == AddItemPermit::OwnerOnly && user_id != self.owner {
+            return Err(AddPollItemError::NotOwner);
+        }
+
         let item_id = self.items.len();
         let item = Item {
             id: item_id,
@@ -330,7 +347,7 @@ impl Poll {
         // TODO this vote_item call makes some redundant jobs
         self.vote_item(user_id, item_id, 1);
         self.changed.update(true);
-        item_id
+        Ok(item_id)
     }
 
     pub fn vote_item(
@@ -440,6 +457,7 @@ pub struct ItemState {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PollState {
     pub poll_title: String,
+    // TODO add AddItemPermit
     pub top_items: Vec<ItemState>,
     pub latest_items: Vec<ItemState>,
     pub user_items: Vec<ItemState>,
@@ -450,6 +468,12 @@ pub enum UserCreateError {
     #[error("You can't add this user to poll, this user already exists.")]
     UserAlreadyExists,
     // TODO add not enough details provided error
+}
+
+#[derive(Debug, Error)]
+pub enum AddPollItemError {
+    #[error("You have to be owner of this poll to add item.")]
+    NotOwner,
 }
 
 #[derive(Debug, Error)]

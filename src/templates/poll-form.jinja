@@ -16,6 +16,13 @@
             <input name="title" type="text" id="title" class="pure-u-1" required />
           </div>
           <div class="pure-u-1">
+            <label for="add_item_permit">Who is allowed to add items?</label>
+            <select name="add_item_permit" id="add_item_permit" class="pure-input-1-2">
+              <option value="Anyone">Anyone</option>
+              <option value="OwnerOnly">Only Me</option>
+            </select>
+          </div>
+          <div class="pure-u-1">
             <label for="user_lookup_method">User Identify Method</label>
             <select name="user_lookup_method" id="user_lookup_method" class="pure-input-1-2">
               <option value="SessionBased">Session Based</option>
