@@ -79,6 +79,11 @@ pub fn assets_router(state: AppState) -> routing::Router<AppState> {
         .with_state(state)
 }
 
+pub async fn anket_index() -> Response {
+    // TODO make an actual index page
+    Redirect::temporary("/p").into_response()
+}
+
 pub async fn poll_index(State(state): State<AppState>) -> Response {
     Html(
         state

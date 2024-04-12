@@ -162,7 +162,13 @@ async fn main() {
             views::identify_user,
         ))
         .nest("/assets", views::assets_router(app_state.clone()))
-        .with_state(app_state);
+        .with_state(app_state)
+        .route("/", routing::get(views::anket_index))
+        // TODO remove this and use tower-http layer
+        .route(
+            "/p/",
+            routing::get(|| async { axum::response::Redirect::temporary("/p") }),
+        );
 
     // TODO add handlers to custom errors like; 404, Failed to deserialize form body
 
