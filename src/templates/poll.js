@@ -141,15 +141,15 @@ var anket_HTML = {
   </div>
 </div>
 <div class="pure-g">
-  <div class="pure-u-1-3">
+  <div class="pure-u-1 pure-u-xl-1-3">
     <h2 class="text-center">Top Voted Items</h2>
     <div id="anket-itemsTop"></div>
   </div>
-  <div class="pure-u-1-3">
+  <div class="pure-u-1 pure-u-xl-1-3">
     <h2 class="text-center">Recently Added Items</h2>
     <div id="anket-itemsLatest"></div>
   </div>
-  <div class="pure-u-1-3">
+  <div class="pure-u-1 pure-u-xl-1-3">
     <h2 class="text-center">My Items</h2>
     <div id="anket-itemsUser"></div>
   </div>

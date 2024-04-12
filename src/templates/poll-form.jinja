@@ -2,8 +2,7 @@
 
 {% block body %}
 <div class="pure-g">
-  <div class="pure-u-4-24"></div>
-  <div class="pure-u-16-24">
+  <div class="pure-u-23-24 margin-auto resp-max-48em">
     <h2>Create a Poll</h2>
     {% if error %}
     <p class="error-box">{{ error }}</p>
@@ -17,14 +16,14 @@
           </div>
           <div class="pure-u-1">
             <label for="add_item_permit">Who is allowed to add items?</label>
-            <select name="add_item_permit" id="add_item_permit" class="pure-input-1-2">
+            <select name="add_item_permit" id="add_item_permit" class="pure-u-1 pure-u-sm-1-2">
               <option value="Anyone">Anyone</option>
               <option value="OwnerOnly">Only Me</option>
             </select>
           </div>
           <div class="pure-u-1">
             <label for="user_lookup_method">User Identify Method</label>
-            <select name="user_lookup_method" id="user_lookup_method" class="pure-input-1-2">
+            <select name="user_lookup_method" id="user_lookup_method" class="pure-u-1 pure-u-sm-1-2">
               <option value="SessionBased">Session Based</option>
               <option value="IPBased">IP Based</option>
             </select>
@@ -34,6 +33,5 @@
       </fieldset>
     </form>
   </div>
-  <div class="pure-u-4-24"></div>
 </div>
 {% endblock %}

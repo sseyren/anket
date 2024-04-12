@@ -40,3 +40,9 @@
     padding: 0.1em;
     line-height: 1;
 }
+
+@media screen and (min-width:48em) {
+    .resp-max-48em {
+        width: 48em;
+    }
+}
