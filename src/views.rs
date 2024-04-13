@@ -28,7 +28,7 @@ pub async fn identify_user<B>(
     next: middleware::Next<B>,
 ) -> Response {
     let user = {
-        // TODO bu header'in baska varyasyonlari da var mi?
+        // TODO improve user IP deriving process
         let ip = match headers.get("X-Forwarded-For") {
             Some(header) => match utils::forwarded_header_ip(header) {
                 Some(ip) => ip,
@@ -151,17 +151,12 @@ pub async fn create_poll(
         return form_with_err(&err.to_string());
     }
 
-    let form = form.expect("we checked that this form is valid");
+    let Form(form) = form.expect("we checked that this form is valid");
     if form.settings.title.len() < 3 {
         return form_with_err("Poll title must be at least 3 characters long.");
     }
 
-    let (user_id, poll) = state
-        .polls
-        .lock()
-        .unwrap()
-        .add_poll(form.settings.clone(), user);
-
+    let (user_id, poll) = state.polls.lock().unwrap().add_poll(form.settings, user);
     let poll_id = poll.lock().unwrap().get_id().to_owned();
     let cookies = cookies.add(poll_cookie(&user_id, &poll_id, state.config.secure));
 
@@ -208,6 +203,7 @@ pub async fn join_poll(
             let (user_sender, user_receiver) = mpsc::unbounded_channel();
             let user_id = poll.lock().unwrap().join(user, user_sender);
 
+            // TODO consider using `ws.on_failed_upgrade`?
             let mut response =
                 ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver));
             response.headers_mut().append(
@@ -238,9 +234,9 @@ pub enum UserResponse {
     PollStateUpdate(models::PollState),
 }
 
-impl Into<ws::Message> for UserResponse {
-    fn into(self) -> ws::Message {
-        ws::Message::Text(serde_json::to_string(&self).expect("PollState should serialize"))
+impl From<UserResponse> for ws::Message {
+    fn from(val: UserResponse) -> Self {
+        ws::Message::Text(serde_json::to_string(&val).expect("PollState should serialize"))
     }
 }
 
@@ -254,9 +250,7 @@ fn websocket_worker(
 
     let task = tokio::spawn(async move {
         while let Some(message) = task_receiver.recv().await {
-            if let Err(error) = sender.send(message).await {
-                return Err(error);
-            }
+            sender.send(message).await?
         }
         Ok(())
     });

@@ -31,7 +31,7 @@ impl AppState {
 
         Self {
             config: Arc::new(config),
-            polls: polls,
+            polls,
             templates,
         }
     }

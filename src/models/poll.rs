@@ -84,9 +84,9 @@ pub enum UserLookupMethod {
     IPBased,
     SessionBased,
 }
-impl Into<Box<dyn UserCollection>> for UserLookupMethod {
-    fn into(self) -> Box<dyn UserCollection> {
-        match self {
+impl From<UserLookupMethod> for Box<dyn UserCollection> {
+    fn from(val: UserLookupMethod) -> Self {
+        match val {
             UserLookupMethod::IPBased => Box::new(IPBasedUsers::new()) as Box<dyn UserCollection>,
             UserLookupMethod::SessionBased => {
                 Box::new(PlainUsers::new()) as Box<dyn UserCollection>
@@ -108,10 +108,7 @@ impl PlainUsers {
 impl UserCollection for PlainUsers {
     fn search_user(&self, details: &UserDetails) -> Option<Uuid> {
         match details.id {
-            Some(id) => match self.users.get(&id) {
-                Some(user) => Some(user.id),
-                None => None,
-            },
+            Some(id) => self.users.get(&id).map(|user| user.id),
             None => None,
         }
     }
@@ -123,7 +120,7 @@ impl UserCollection for PlainUsers {
         &mut self.users
     }
 
-    fn create_user(&mut self, details: UserDetails) -> Result<Uuid, UserCreateError> {
+    fn create_user(&mut self, _details: UserDetails) -> Result<Uuid, UserCreateError> {
         let id = self.users.generate_key();
         self.users.insert(id, PollUser::new(id));
         Ok(id)
@@ -333,7 +330,7 @@ impl Poll {
         let item_id = self.items.len();
         let item = Item {
             id: item_id,
-            user_id: user_id,
+            user_id,
             text: item_text,
             score: 0,
             votes: HashMap::new(),
@@ -344,8 +341,9 @@ impl Poll {
         self.items_by_user.insert_vec(user_id, item_id);
         self.last_items.push(item_id);
 
-        // TODO this vote_item call makes some redundant jobs
-        self.vote_item(user_id, item_id, 1);
+        // TODO this vote_item call should be optional/poll specific
+        // ok to ignore err; we just created the item & we know that vote value is OK
+        let _ = self.vote_item(user_id, item_id, 1);
         self.changed.update(true);
         Ok(item_id)
     }
@@ -399,7 +397,7 @@ impl Poll {
                 .collect(),
             user_items: self
                 .items_by_user
-                .get(&user_id)
+                .get(user_id)
                 .unwrap_or(&vec![])
                 .iter()
                 .rev()
