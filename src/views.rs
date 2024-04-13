@@ -2,7 +2,7 @@ use crate::{models, utils, AppState, SESSION_DURATION, SESSION_KEY};
 
 use axum::{
     extract::{rejection, ws, ConnectInfo, Extension, Path, State},
-    http::{header::HeaderMap, Request, StatusCode},
+    http::{header, Request, StatusCode},
     middleware,
     response::{Html, IntoResponse, Redirect, Response},
     routing, Form,
@@ -22,7 +22,7 @@ use uuid::Uuid;
 // TODO transform this into tower middleware
 pub async fn identify_user<B>(
     ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    headers: header::HeaderMap,
     cookies: CookieJar,
     mut request: Request<B>,
     next: middleware::Next<B>,
@@ -52,7 +52,7 @@ pub fn assets_router(state: AppState) -> routing::Router<AppState> {
             "/anket.css",
             routing::get(|State(state): State<AppState>| async move {
                 (
-                    [(axum::http::header::CONTENT_TYPE, "text/css")],
+                    [(header::CONTENT_TYPE, "text/css")],
                     state
                         .templates
                         .get_template("anket.css")
@@ -66,7 +66,7 @@ pub fn assets_router(state: AppState) -> routing::Router<AppState> {
             "/poll.js",
             routing::get(|State(state): State<AppState>| async move {
                 (
-                    [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+                    [(header::CONTENT_TYPE, "text/javascript")],
                     state
                         .templates
                         .get_template("poll.js")
@@ -109,6 +109,15 @@ pub async fn poll_index(State(state): State<AppState>) -> Response {
             .unwrap(),
     )
     .into_response()
+}
+
+fn poll_cookie(user_id: &Uuid, poll_id: &str, secure: bool) -> Cookie<'static> {
+    Cookie::build(SESSION_KEY, user_id.to_string())
+        .max_age(SESSION_DURATION)
+        .http_only(false)
+        .path(format!("/p/{}", poll_id))
+        .secure(secure)
+        .finish()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -154,14 +163,7 @@ pub async fn create_poll(
         .add_poll(form.settings.clone(), user);
 
     let poll_id = poll.lock().unwrap().get_id().to_owned();
-    let cookies = cookies.add(
-        Cookie::build(SESSION_KEY, user_id.to_string())
-            .max_age(SESSION_DURATION)
-            .http_only(false)
-            .path(format!("/p/{}", poll_id))
-            .secure(state.config.secure)
-            .finish(),
-    );
+    let cookies = cookies.add(poll_cookie(&user_id, &poll_id, state.config.secure));
 
     (cookies, Redirect::to(&format!("/p/{}", poll_id))).into_response()
 }
@@ -194,20 +196,29 @@ pub async fn get_poll(State(state): State<AppState>, Path(poll_id): Path<String>
     }
 }
 
-// TODO don't forget to return cookie in response
 pub async fn join_poll(
     State(state): State<AppState>,
     Extension(user): Extension<models::UserDetails>,
     Path(poll_id): Path<String>,
     ws: ws::WebSocketUpgrade,
 ) -> Response {
-    // TODO buralardaki unlock() larda lock u yanlislikla birakamama ile ilgili biseyler yasaniyor olabilir mi?
     let poll = state.polls.lock().unwrap().get_poll(&poll_id);
     match poll {
         Some(poll) => {
             let (user_sender, user_receiver) = mpsc::unbounded_channel();
             let user_id = poll.lock().unwrap().join(user, user_sender);
-            ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver))
+
+            let mut response =
+                ws.on_upgrade(move |socket| events_handler(socket, user_id, poll, user_receiver));
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                poll_cookie(&user_id, &poll_id, state.config.secure)
+                    .encoded()
+                    .to_string()
+                    .parse()
+                    .expect("nothing to fail; cookie details doesn't have anything user provided"),
+            );
+            response
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
