@@ -1,7 +1,7 @@
 use crate::{models, utils, AppState, SESSION_DURATION, SESSION_KEY};
 
 use axum::{
-    extract::{ws, ConnectInfo, Extension, Path, State},
+    extract::{rejection, ws, ConnectInfo, Extension, Path, State},
     http::{header::HeaderMap, Request, StatusCode},
     middleware,
     response::{Html, IntoResponse, Redirect, Response},
@@ -79,6 +79,21 @@ pub fn assets_router(state: AppState) -> routing::Router<AppState> {
         .with_state(state)
 }
 
+pub async fn handler_404(State(state): State<AppState>) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Html(
+            state
+                .templates
+                .get_template("404.jinja")
+                .unwrap()
+                .render(context!())
+                .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
 pub async fn anket_index() -> Response {
     // TODO make an actual index page
     Redirect::temporary("/p").into_response()
@@ -106,38 +121,49 @@ pub async fn create_poll(
     State(state): State<AppState>,
     Extension(user): Extension<models::UserDetails>,
     cookies: CookieJar,
-    Form(form): Form<CreatePollReq>,
+    form: Result<Form<CreatePollReq>, rejection::FormRejection>,
 ) -> Response {
-    let mut error = None;
-    if form.settings.title.len() < 3 {
-        error = Some("Poll title must be at least 3 characters long.");
-    }
-
-    let (user_id, poll) = state.polls.lock().unwrap().add_poll(form.settings, user);
-
-    match error {
-        Some(msg) => Html(
-            state
-                .templates
-                .get_template("poll-form.jinja")
-                .unwrap()
-                .render(context!(error => msg))
-                .unwrap(),
+    let form_with_err = |msg: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Html(
+                state
+                    .templates
+                    .get_template("poll-form.jinja")
+                    .unwrap()
+                    .render(context!(error => msg))
+                    .unwrap(),
+            ),
         )
-        .into_response(),
-        None => {
-            let poll_id = poll.lock().unwrap().get_id().to_owned();
-            let cookies = cookies.add(
-                Cookie::build(SESSION_KEY, user_id.to_string())
-                    .max_age(SESSION_DURATION)
-                    .http_only(false)
-                    .path(format!("/p/{}", poll_id))
-                    .secure(state.config.secure)
-                    .finish(),
-            );
-            (cookies, Redirect::to(&format!("/p/{}", poll_id))).into_response()
-        }
+            .into_response()
+    };
+
+    if let Err(err) = form {
+        return form_with_err(&err.to_string());
     }
+
+    let form = form.expect("we checked that this form is valid");
+    if form.settings.title.len() < 3 {
+        return form_with_err("Poll title must be at least 3 characters long.");
+    }
+
+    let (user_id, poll) = state
+        .polls
+        .lock()
+        .unwrap()
+        .add_poll(form.settings.clone(), user);
+
+    let poll_id = poll.lock().unwrap().get_id().to_owned();
+    let cookies = cookies.add(
+        Cookie::build(SESSION_KEY, user_id.to_string())
+            .max_age(SESSION_DURATION)
+            .http_only(false)
+            .path(format!("/p/{}", poll_id))
+            .secure(state.config.secure)
+            .finish(),
+    );
+
+    (cookies, Redirect::to(&format!("/p/{}", poll_id))).into_response()
 }
 
 pub async fn get_poll(State(state): State<AppState>, Path(poll_id): Path<String>) -> Response {
@@ -151,7 +177,20 @@ pub async fn get_poll(State(state): State<AppState>, Path(poll_id): Path<String>
                 .unwrap(),
         )
         .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Html(
+                state
+                    .templates
+                    .get_template("404.jinja")
+                    .unwrap()
+                    .render(
+                        context!(detail => "The poll you are looking for may have been closed."),
+                    )
+                    .unwrap(),
+            ),
+        )
+            .into_response(),
     }
 }
 

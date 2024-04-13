@@ -109,16 +109,15 @@ async fn main() {
             app_state.clone(),
             views::identify_user,
         ))
-        .nest("/assets", views::assets_router(app_state.clone()))
-        .with_state(app_state)
         .route("/", routing::get(views::anket_index))
         // TODO remove this and use tower-http layer
         .route(
             "/p/",
             routing::get(|| async { axum::response::Redirect::temporary("/p") }),
-        );
-
-    // TODO add handlers to custom errors like; 404, Failed to deserialize form body
+        )
+        .nest("/assets", views::assets_router(app_state.clone()))
+        .fallback(views::handler_404)
+        .with_state(app_state);
 
     info!("started on {}", &app_config.bind_addr);
     axum::Server::bind(&app_config.bind_addr)

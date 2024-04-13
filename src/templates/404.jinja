@@ -1,0 +1,11 @@
+{% extends "base.jinja" %}
+
+{% block body %}
+<div class="pure-g">
+  <div class="pure-u-23-24 margin-auto resp-max-48em">
+    <h2>Page Not Found</h2>
+    {% if detail %}<p>{{ detail }}</p>{% endif %}
+    <p>You can go to <a href="/">main page</a>.</p>
+  </div>
+</div>
+{% endblock %}
