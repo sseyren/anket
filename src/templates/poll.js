@@ -132,8 +132,8 @@ var anket_HTML = {
     <form id="anket-pollForm" class="pure-form">
       <fieldset>
         <legend>Create an option for this poll</legend>
-        <input id="anket-itemText" type="text" class="pure-input-3-4" placeholder="Option text" />
-        <button type="submit" class="pure-button pure-input-1-4 pure-button-primary">
+        <input id="anket-itemText" type="text" class="pure-u-1 pure-u-sm-3-4" placeholder="Option text" />
+        <button type="submit" class="pure-u-3-4 pure-u-sm-5-24 pure-button pure-button-primary">
           Create
         </button>
       </fieldset>
